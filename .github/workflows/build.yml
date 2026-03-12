@@ -1,0 +1,263 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run typecheck
+
+  unit-tests:
+    name: Package Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm test
+
+  build-ios:
+    name: iOS Build
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup engine source (copy)
+        run: bash scripts/prepack.sh
+
+      - name: Build Expo example (iOS)
+        working-directory: examples/expo-test
+        run: |
+          npm install --ignore-scripts
+          PKG_TGZ=$(cd ../.. && node -p 'const p=require("./package.json"); `${p.name.replace(/^@/, "").replace(/\//g, "-")}-${p.version}.tgz`')
+          (cd ../.. && npm pack --silent)
+          npm install --ignore-scripts "../../${PKG_TGZ}"
+          npx expo prebuild --platform ios --no-install
+          cd ios
+          pod install
+          if ! xcodebuild -workspace LocalLLMExpoTest.xcworkspace \
+            -scheme LocalLLMExpoTest \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build > xcodebuild.log 2>&1; then
+            grep -n -E -C 20 ' error: |fatal error:|clang: error:|ld: |The following build commands failed:' xcodebuild.log || true
+            exit 1
+          fi
+
+  build-android:
+    name: Android Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup engine source (copy)
+        run: bash scripts/prepack.sh
+
+      - name: Build Expo example (Android)
+        working-directory: examples/expo-test
+        run: |
+          npm install --install-links --ignore-scripts
+          # Ensure cpp/ (built by prepack.sh) is present — npm may skip it due to .gitignore
+          cp -rL ../../cpp node_modules/local-llm-rn/cpp
+          npx expo prebuild --platform android --no-install
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+  build-bare-rn-ios:
+    name: Bare RN iOS Build
+    if: ${{ false }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup engine source (copy)
+        run: bash scripts/prepack.sh
+
+      - name: Build bare RN example (iOS)
+        working-directory: examples/react-native-test
+        run: |
+          npm install --install-links --ignore-scripts
+          # Ensure cpp/ (built by prepack.sh) is present — npm may skip it due to .gitignore
+          cp -rL ../../cpp node_modules/local-llm-rn/cpp
+          npm run bootstrap:native
+          cd ios
+          pod install
+          if ! xcodebuild -workspace LocalLLMTest.xcworkspace \
+            -scheme LocalLLMTest \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build > xcodebuild.log 2>&1; then
+            grep -n -E -C 20 ' error: |fatal error:|clang: error:|ld: |The following build commands failed:' xcodebuild.log || true
+            exit 1
+          fi
+
+  build-bare-rn-android:
+    name: Bare RN Android Build
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup engine source (copy)
+        run: bash scripts/prepack.sh
+
+      - name: Build bare RN example (Android)
+        working-directory: examples/react-native-test
+        run: |
+          npm install --install-links --ignore-scripts
+          # Ensure cpp/ (built by prepack.sh) is present — npm may skip it due to .gitignore
+          cp -rL ../../cpp node_modules/local-llm-rn/cpp
+          npm run bootstrap:native
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+  smoke-bare-rn-ios:
+    name: Bare RN iOS Smoke Test
+    if: ${{ false }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup engine source (copy)
+        run: bash scripts/prepack.sh
+
+      - name: Install Maestro
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Run bare RN smoke test (iOS)
+        working-directory: examples/react-native-test
+        run: |
+          npm install --install-links --ignore-scripts
+          # Ensure cpp/ (built by prepack.sh) is present — npm may skip it due to .gitignore
+          cp -rL ../../cpp node_modules/local-llm-rn/cpp
+          npm run bootstrap:native
+          cd ios
+          pod install
+          cd ..
+          nohup npm start > /tmp/local-llm-rn-metro-ios.log 2>&1 &
+          for i in {1..60}; do nc -z 127.0.0.1 8081 && break; sleep 2; done
+          npx react-native run-ios --simulator "iPhone 16" --no-packager
+          maestro test .maestro/smoke.yaml
+
+  smoke-bare-rn-android:
+    name: Bare RN Android Smoke Test
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup engine source (copy)
+        run: bash scripts/prepack.sh
+
+      - name: Install Maestro
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Run bare RN smoke test (Android)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: |
+            cd examples/react-native-test
+            npm install --install-links --ignore-scripts
+            npm run bootstrap:native
+            nohup npm start > /tmp/local-llm-rn-metro-android.log 2>&1 &
+            for i in {1..60}; do nc -z 127.0.0.1 8081 && break; sleep 2; done
+            npx react-native run-android --no-packager
+            maestro test .maestro/smoke.yaml
+
+  prepack-dry-run:
+    name: Prepack dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Initialize engine submodule
+        run: git submodule update --init --recursive
+      - name: Run prepack
+        run: bash scripts/prepack.sh
+      - name: Check package size
+        run: |
+          SIZE=$(du -sm cpp | cut -f1)
+          echo "Package cpp/ size: ${SIZE} MB"
+          if [ "$SIZE" -gt 50 ]; then
+            echo "ERROR: cpp/ exceeds 50 MB limit ($SIZE MB)"
+            exit 1
+          fi
+      - name: Verify essential files
+        run: |
+          test -f cpp/CMakeLists.txt
+          test -d cpp/src
+          test -d cpp/ggml
+          test -d cpp/common
+          test -d cpp/include
+          echo "All essential files present"

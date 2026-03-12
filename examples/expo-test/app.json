@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "LocalLLM Expo Test",
+    "slug": "local-llm-expo-test",
+    "version": "1.0.0",
+    "scheme": "local-llm-test",
+    "platforms": ["ios", "android"],
+    "ios": {
+      "bundleIdentifier": "com.hilum.localllm.expotest",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.hilum.localllm.expotest"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "16.0"
+          },
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "minSdkVersion": 33
+          }
+        }
+      ]
+    ]
+  }
+}

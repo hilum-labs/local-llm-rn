@@ -1,0 +1,23 @@
+{
+  "name": "local-llm-rn-test",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "start": "react-native start",
+    "bootstrap:native": "bash scripts/bootstrap-native.sh",
+    "ios": "npm run bootstrap:native && react-native run-ios",
+    "android": "npm run bootstrap:native && react-native run-android",
+    "pods": "npm run bootstrap:native && cd ios && pod install"
+  },
+  "dependencies": {
+    "react": "19.2.0",
+    "react-native": "0.83.0",
+    "local-llm-rn": "file:../../"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "20.1.2",
+    "@react-native/metro-config": "0.83.0",
+    "@react-native/typescript-config": "0.83.0",
+    "typescript": "~5.7.0"
+  }
+}

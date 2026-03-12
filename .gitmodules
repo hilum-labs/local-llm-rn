@@ -1,0 +1,5 @@
+[submodule "vendor/hilum-local-llm-engine"]
+	path = vendor/hilum-local-llm-engine
+	url = https://github.com/hilum-labs/hilum-local-llm-engine.git
+	branch = main
+	ignore = all

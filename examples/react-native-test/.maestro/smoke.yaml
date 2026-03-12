@@ -1,0 +1,17 @@
+appId: com.hilum.localllmtest
+---
+- launchApp:
+    clearState: true
+- assertVisible: "SMOKE STATUS: IDLE"
+- tapOn: "Run Smoke Test"
+- assertVisible: "SMOKE STATUS: RUNNING"
+- extendedWaitUntil:
+    visible: "SMOKE STATUS: PASSED"
+    timeout: 900000
+- assertVisible: "STEP DEVICE: PASS"
+- assertVisible: "STEP DOWNLOAD: PASS"
+- assertVisible: "STEP LIST-AFTER-DOWNLOAD: PASS"
+- assertVisible: "STEP LOAD: PASS"
+- assertVisible: "STEP INFER: PASS"
+- assertVisible: "STEP REMOVE: PASS"
+- assertVisible: "STEP LIST-AFTER-REMOVE: PASS"

@@ -1,0 +1,32 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Ignore the repo-root cpp symlink/directory (created by prepare.sh or prepack.sh).
+/cpp
+
+# Library build artifacts
+android/build/
+android/.cxx/
+android/.gradle/
+
+# Example build artifacts
+examples/*/node_modules/
+examples/*/ios/Pods/
+examples/*/ios/build/
+examples/*/android/.gradle/
+examples/*/android/build/
+examples/*/android/app/build/
+examples/*/.expo/
+examples/*/dist/
+examples/*/*.jsbundle
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Vendored engine: ignore contents but allow the submodule gitlink to be tracked.
+/vendor/*
+!/vendor/hilum-local-llm-engine
