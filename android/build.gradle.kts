@@ -130,6 +130,7 @@ android {
                     "-DGGML_VULKAN_VMA=ON",
                     "-DGGML_VULKAN_BUILD_ADRENO_SHADERS=ON",
                     // Disable unneeded targets
+                    "-DLLAMA_BUILD_TOOLS=OFF",
                     "-DLLAMA_BUILD_TESTS=OFF",
                     "-DLLAMA_BUILD_EXAMPLES=OFF",
                     "-DLLAMA_BUILD_SERVER=OFF",

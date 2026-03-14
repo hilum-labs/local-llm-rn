@@ -46,7 +46,7 @@ assert_not_exists() {
 assert_file_contains() {
   local path="$1"
   local pattern="$2"
-  if ! grep -q "$pattern" "$path"; then
+  if ! grep -F -q "$pattern" "$path"; then
     echo "ERROR: expected pattern '$pattern' in $path"
     exit 1
   fi
