@@ -1,6 +1,6 @@
 {
   "name": "local-llm-rn",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "packageManager": "pnpm@10.29.2",
   "description": "On-device LLM inference for React Native with Metal (iOS) and Vulkan (Android) GPU acceleration",
   "main": "src/index.ts",
