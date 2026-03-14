@@ -29,6 +29,20 @@ jobs:
       - run: npm install
       - run: npm test
 
+  native-smoke:
+    name: Native Smoke Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - name: Run native bridge and vendoring checks
+        run: npm run smoke:native-bridge
+
   build-ios:
     name: iOS Build
     runs-on: macos-26

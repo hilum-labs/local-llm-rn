@@ -19,6 +19,8 @@
     "!cpp/.gitkeep"
   ],
   "scripts": {
+    "smoke:native-bridge": "vitest run tests/native-contract.test.ts tests/native-bridge.test.ts tests/local-llm.test.ts tests/vision.test.ts && bash scripts/verify-vendoring.sh",
+    "verify:vendoring": "bash scripts/verify-vendoring.sh",
     "prepare": "bash scripts/prepare.sh",
     "prepack": "bash scripts/prepack.sh",
     "release": "node scripts/release.mjs",

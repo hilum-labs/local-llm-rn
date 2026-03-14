@@ -228,4 +228,19 @@ describe('native-bridge streaming edge cases', () => {
     expect(callback.mock.calls[1]).toEqual([null, ' there']);
     expect(callback.mock.calls[2]).toEqual([null, null]);
   });
+
+  it('forwards chat template and schema conversion calls unchanged', async () => {
+    const { createReactNativeAddon } = await import('../src/native-bridge');
+    const addon = createReactNativeAddon();
+
+    const model = await addon.loadModel('/test.gguf', {});
+    const messages = [{ role: 'user', content: 'hi' }];
+    const schema = '{"type":"object","properties":{"answer":{"type":"string"}}}';
+
+    expect(addon.applyChatTemplate(model, messages, true)).toBe('<template>');
+    expect(addon.jsonSchemaToGrammar(schema)).toBe('root ::= "test"');
+
+    expect(nativeMock.applyChatTemplate).toHaveBeenCalledWith('model-1', messages, true);
+    expect(nativeMock.jsonSchemaToGrammar).toHaveBeenCalledWith(schema);
+  });
 });

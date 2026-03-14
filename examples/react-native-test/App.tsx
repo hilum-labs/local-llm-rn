@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   SafeAreaView,
@@ -20,6 +20,7 @@ type StepKey =
   | 'download'
   | 'listAfterDownload'
   | 'load'
+  | 'benchmark'
   | 'infer'
   | 'remove'
   | 'listAfterRemove';
@@ -29,6 +30,7 @@ const STEP_LABELS: Record<StepKey, string> = {
   download: 'download',
   listAfterDownload: 'list-after-download',
   load: 'load',
+  benchmark: 'benchmark',
   infer: 'infer',
   remove: 'remove',
   listAfterRemove: 'list-after-remove',
@@ -39,6 +41,7 @@ const INITIAL_STEPS: Record<StepKey, StepState> = {
   download: 'idle',
   listAfterDownload: 'idle',
   load: 'idle',
+  benchmark: 'idle',
   infer: 'idle',
   remove: 'idle',
   listAfterRemove: 'idle',
@@ -48,6 +51,7 @@ type OverallState = 'idle' | 'running' | 'passed' | 'failed';
 
 export default function App() {
   const manager = useMemo(() => new ModelManager(), []);
+  const hasAutoStarted = useRef(false);
   const [overall, setOverall] = useState<OverallState>('idle');
   const [steps, setSteps] = useState<Record<StepKey, StepState>>({ ...INITIAL_STEPS });
   const [logs, setLogs] = useState<string[]>(['Smoke test ready.']);
@@ -124,6 +128,20 @@ export default function App() {
       });
       setStep('load', 'pass', 'model initialized');
 
+      currentStep = 'benchmark';
+      setStep('benchmark', 'running', 'running cpu benchmark');
+      const benchmark = await ai.benchmark({
+        promptTokens: 128,
+        generateTokens: 64,
+        iterations: 3,
+      });
+      const benchmarkSummary =
+        `prompt_tps=${benchmark.promptTokensPerSec.toFixed(2)} ` +
+        `gen_tps=${benchmark.generatedTokensPerSec.toFixed(2)} ` +
+        `ttft_ms=${benchmark.ttftMs.toFixed(2)} total_ms=${benchmark.totalMs.toFixed(2)}`;
+      console.log(`BENCHMARK_RESULT ${benchmarkSummary}`);
+      setStep('benchmark', 'pass', benchmarkSummary);
+
       currentStep = 'infer';
       setStep('infer', 'running', 'running chat completion');
       const response = await ai.chat.completions.create({
@@ -171,6 +189,14 @@ export default function App() {
       setLoading(false);
     }
   }, [appendLog, loading, manager, reset, setStep]);
+
+  useEffect(() => {
+    if (hasAutoStarted.current) {
+      return;
+    }
+    hasAutoStarted.current = true;
+    void runSmokeTest();
+  }, [runSmokeTest]);
 
   return (
     <SafeAreaView style={styles.container}>
