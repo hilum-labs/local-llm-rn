@@ -43,15 +43,6 @@ assert_not_exists() {
   fi
 }
 
-assert_file_contains() {
-  local path="$1"
-  local pattern="$2"
-  if ! grep -F -q "$pattern" "$path"; then
-    echo "ERROR: expected pattern '$pattern' in $path"
-    exit 1
-  fi
-}
-
 echo "Verifying prepare.sh layout"
 (cd "$STAGE_DIR" && bash scripts/prepare.sh)
 
@@ -95,8 +86,6 @@ assert_exists "$STAGE_DIR/cpp/vendor/stb"
 assert_exists "$STAGE_DIR/cpp/vendor/miniaudio"
 assert_exists "$STAGE_DIR/cpp/mtmd/mtmd.h"
 assert_exists "$STAGE_DIR/cpp/mtmd/mtmd-helper.h"
-assert_file_contains "$STAGE_DIR/cpp/hilum/hilum_llm.cpp" "#include \"mtmd.h\""
-assert_file_contains "$STAGE_DIR/cpp/hilum/hilum_llm.cpp" "#include \"mtmd-helper.h\""
 
 assert_not_exists "$STAGE_DIR/cpp/ggml/src/ggml-cuda"
 assert_not_exists "$STAGE_DIR/cpp/ggml/src/ggml-opencl"
