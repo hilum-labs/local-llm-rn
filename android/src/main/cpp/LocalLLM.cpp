@@ -67,6 +67,29 @@ static std::mutex g_log_mutex;
 
 // ── JNI helpers ──────────────────────────────────────────────────────────────
 
+static JNIEnv *get_jni_env(JavaVM *jvm, bool &detach) {
+    detach = false;
+    if (!jvm) {
+        LOGE("Cannot access JNI environment: JavaVM is null");
+        return nullptr;
+    }
+
+    JNIEnv *env = nullptr;
+    const jint status = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (status == JNI_OK) return env;
+    if (status != JNI_EDETACHED) {
+        LOGE("Cannot access JNI environment: GetEnv returned %d", status);
+        return nullptr;
+    }
+    if (jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+        LOGE("Cannot access JNI environment: AttachCurrentThread failed");
+        return nullptr;
+    }
+
+    detach = true;
+    return env;
+}
+
 static std::string jstring_to_std(JNIEnv *env, jstring jstr) {
     if (!jstr) return "";
     const char *chars = env->GetStringUTFChars(jstr, nullptr);
@@ -665,12 +688,9 @@ JNI_FN(nativeStartStream)(JNIEnv *env, jobject thiz, jstring modelId, jstring co
         [](const char *token, int32_t token_len, void *ud) -> bool {
             auto *s = static_cast<StreamState *>(ud);
 
-            JNIEnv *env;
             bool detach = false;
-            if (s->jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                s->jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
-                detach = true;
-            }
+            JNIEnv *env = get_jni_env(s->jvm, detach);
+            if (!env) return false;
 
             jclass cls = env->GetObjectClass(s->moduleRef);
             jmethodID emitMethod = env->GetMethodID(cls, "emitToken",
@@ -998,12 +1018,9 @@ JNI_FN(nativeStartStreamVision)(JNIEnv *env, jobject thiz, jstring modelId,
         [](const char *token, int32_t token_len, void *ud) -> bool {
             auto *s = static_cast<StreamState *>(ud);
 
-            JNIEnv *env;
             bool detach = false;
-            if (s->jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                s->jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
-                detach = true;
-            }
+            JNIEnv *env = get_jni_env(s->jvm, detach);
+            if (!env) return false;
 
             jclass cls = env->GetObjectClass(s->moduleRef);
             jmethodID emitMethod = env->GetMethodID(cls, "emitToken",
@@ -1272,12 +1289,9 @@ JNI_FN(nativeStartBatch)(JNIEnv *env, jobject thiz, jstring modelId, jstring con
         [](hilum_batch_event event, void *ud) -> bool {
             auto *s = static_cast<BatchState *>(ud);
 
-            JNIEnv *env;
             bool detach = false;
-            if (s->jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                s->jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
-                detach = true;
-            }
+            JNIEnv *env = get_jni_env(s->jvm, detach);
+            if (!env) return false;
 
             jclass cls = env->GetObjectClass(s->moduleRef);
             jmethodID emitMethod = env->GetMethodID(cls, "emitBatchToken",
@@ -1368,12 +1382,9 @@ JNI_FN(nativeEnableLogEvents)(JNIEnv *env, jobject thiz, jboolean enabled) {
         hilum_log_set([](hilum_log_level level, const char *text, void *) {
             if (!g_log_events_enabled.load(std::memory_order_relaxed)) return;
 
-            JNIEnv *env;
             bool detach = false;
-            if (g_jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                g_jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
-                detach = true;
-            }
+            JNIEnv *env = get_jni_env(g_jvm, detach);
+            if (!env) return;
 
             std::lock_guard<std::mutex> lock(g_log_mutex);
             if (g_module_ref) {
