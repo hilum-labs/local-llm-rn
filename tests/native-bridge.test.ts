@@ -4,12 +4,14 @@ import { LocalLLMErrorCode } from '../src/errors';
 const startStream = vi.fn();
 const stopStream = vi.fn();
 
-let tokenHandler: ((event: any) => void) | null = null;
+const eventHandlers = new Map<string, (event: any) => void>();
 
 const addListener = vi.fn((eventName: string, handler: (event: any) => void) => {
-  if (eventName === 'onToken') tokenHandler = handler;
-  return { remove: vi.fn(() => { tokenHandler = null; }) };
+  eventHandlers.set(eventName, handler);
+  return { remove: vi.fn(() => { eventHandlers.delete(eventName); }) };
 });
+
+const emitNative = (eventName: string, event: any) => eventHandlers.get(eventName)?.(event);
 
 class MockNativeEventEmitter {
   addListener = addListener;
@@ -46,6 +48,7 @@ const nativeMock = {
   jsonSchemaToGrammar: vi.fn(() => 'root ::= "test"'),
   getEmbeddingDimension: vi.fn(() => 384),
   createEmbeddingContext: vi.fn(() => 'emb-1'),
+  freeEmbeddingContext: vi.fn(),
   embed: vi.fn(() => [0.1, 0.2]),
   embedBatch: vi.fn(() => [[0.1], [0.2]]),
   startBatch: vi.fn(),
@@ -84,7 +87,20 @@ vi.mock('../src/NativeLocalLLM', () => ({
 describe('native-bridge streaming edge cases', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    tokenHandler = null;
+    eventHandlers.clear();
+  });
+
+  it('frees embedding contexts through the dedicated native method', async () => {
+    const { createReactNativeAddon } = await import('../src/native-bridge');
+    const addon = createReactNativeAddon();
+    const model = await addon.loadModel('/test.gguf', {});
+    const context = addon.createEmbeddingContext(model, {});
+
+    addon.freeEmbeddingContext(context);
+
+    expect(nativeMock.freeEmbeddingContext).toHaveBeenCalledOnce();
+    expect(nativeMock.freeEmbeddingContext).toHaveBeenCalledWith('emb-1');
+    expect(nativeMock.freeContext).not.toHaveBeenCalled();
   });
 
   it('handles error events during streaming with typed LocalLLMError', async () => {
@@ -98,13 +114,14 @@ describe('native-bridge streaming edge cases', () => {
     addon.inferStream(model, ctx, 'test prompt', {}, callback);
 
     // Simulate error event from native
-    tokenHandler?.({ contextId: (ctx as any).__id, error: 'Out of context', done: false });
+    emitNative('onToken', { contextId: (ctx as any).__id, error: 'Out of context', done: false });
 
     expect(callback).toHaveBeenCalledOnce();
     const [err] = callback.mock.calls[0];
     expect(err).toBeInstanceOf(Error);
     expect(err.code).toBe(LocalLLMErrorCode.STREAM_FAILED);
     expect(err.message).toBe('Out of context');
+    expect(eventHandlers.has('onToken')).toBe(false);
   });
 
   it('handles immediate done without tokens', async () => {
@@ -118,7 +135,7 @@ describe('native-bridge streaming edge cases', () => {
     addon.inferStream(model, ctx, '', {}, callback);
 
     // Simulate immediate completion
-    tokenHandler?.({ contextId: (ctx as any).__id, done: true });
+    emitNative('onToken', { contextId: (ctx as any).__id, done: true });
 
     expect(callback).toHaveBeenCalledOnce();
     expect(callback).toHaveBeenCalledWith(null, null);
@@ -135,7 +152,7 @@ describe('native-bridge streaming edge cases', () => {
     addon.inferStream(model, ctx, 'test', {}, callback);
 
     // Simulate event for a different context
-    tokenHandler?.({ contextId: 'other-context-id', token: 'wrong', done: false });
+    emitNative('onToken', { contextId: 'other-context-id', token: 'wrong', done: false });
 
     expect(callback).not.toHaveBeenCalled();
   });
@@ -180,7 +197,7 @@ describe('native-bridge streaming edge cases', () => {
     expect(stopStream).toHaveBeenCalledWith((ctx as any).__id);
 
     // Native sends done after cancel is processed
-    tokenHandler?.({ contextId: (ctx as any).__id, done: true });
+    emitNative('onToken', { contextId: (ctx as any).__id, done: true });
 
     expect(callback).toHaveBeenCalledOnce();
     expect(callback).toHaveBeenCalledWith(null, null);
@@ -201,7 +218,7 @@ describe('native-bridge streaming edge cases', () => {
     expect(nativeMock.freeModel).toHaveBeenCalledWith((model as any).__id);
 
     // Native layer detects the freed model and sends an error event
-    tokenHandler?.({ contextId: (ctx as any).__id, error: 'Model was freed', done: false });
+    emitNative('onToken', { contextId: (ctx as any).__id, error: 'Model was freed', done: false });
 
     expect(callback).toHaveBeenCalledOnce();
     const [err] = callback.mock.calls[0];
@@ -219,14 +236,50 @@ describe('native-bridge streaming edge cases', () => {
     addon.inferStream(model, ctx, 'Hello', {}, callback);
 
     const ctxId = (ctx as any).__id;
-    tokenHandler?.({ contextId: ctxId, token: 'Hi', done: false });
-    tokenHandler?.({ contextId: ctxId, token: ' there', done: false });
-    tokenHandler?.({ contextId: ctxId, done: true });
+    emitNative('onToken', { contextId: ctxId, token: 'Hi', done: false });
+    emitNative('onToken', { contextId: ctxId, token: ' there', done: false });
+    emitNative('onToken', { contextId: ctxId, done: true });
 
     expect(callback).toHaveBeenCalledTimes(3);
     expect(callback.mock.calls[0]).toEqual([null, 'Hi']);
     expect(callback.mock.calls[1]).toEqual([null, ' there']);
     expect(callback.mock.calls[2]).toEqual([null, null]);
+  });
+
+  it('removes batch listeners immediately after an error', async () => {
+    const { createReactNativeAddon } = await import('../src/native-bridge');
+    const addon = createReactNativeAddon();
+    const model = await addon.loadModel('/test.gguf', {});
+    const ctx = addon.createContext(model, {});
+    const callback = vi.fn();
+
+    addon.inferBatch(model, ctx, ['one', 'two'], {}, callback);
+    emitNative('onBatchToken', {
+      contextId: (ctx as any).__id,
+      seqIndex: 0,
+      error: 'Batch decode failed',
+    });
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(callback.mock.calls[0]?.[0]).toMatchObject({ code: LocalLLMErrorCode.INFERENCE_FAILED });
+    expect(eventHandlers.has('onBatchToken')).toBe(false);
+  });
+
+  it('removes batch listeners after every sequence completes', async () => {
+    const { createReactNativeAddon } = await import('../src/native-bridge');
+    const addon = createReactNativeAddon();
+    const model = await addon.loadModel('/test.gguf', {});
+    const ctx = addon.createContext(model, {});
+    const callback = vi.fn();
+    const contextId = (ctx as any).__id;
+
+    addon.inferBatch(model, ctx, ['one', 'two'], {}, callback);
+    emitNative('onBatchToken', { contextId, seqIndex: 0, done: true, finishReason: 'length' });
+    expect(eventHandlers.has('onBatchToken')).toBe(true);
+    emitNative('onBatchToken', { contextId, seqIndex: 1, done: true, finishReason: 'stop' });
+
+    expect(callback).toHaveBeenCalledTimes(2);
+    expect(eventHandlers.has('onBatchToken')).toBe(false);
   });
 
   it('forwards chat template and schema conversion calls unchanged', async () => {

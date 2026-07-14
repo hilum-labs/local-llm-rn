@@ -16,6 +16,25 @@ function joinPath(...parts: string[]): string {
     .join('/');
 }
 
+function normalizePath(path: string): string {
+  const absolute = path.startsWith('/');
+  const segments: string[] = [];
+
+  for (const segment of path.replace(/\\/g, '/').split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      if (segments.length === 0) {
+        throw new LocalLLMError(LocalLLMErrorCode.INVALID_PATH, `Path "${path}" escapes its root`);
+      }
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return `${absolute ? '/' : ''}${segments.join('/')}` || (absolute ? '/' : '.');
+}
+
 export class ModelCache implements ModelRegistry {
   readonly cacheDir: string;
   private indexPath: string;
@@ -27,8 +46,9 @@ export class ModelCache implements ModelRegistry {
 
   /** Ensure a path is within the cache directory to prevent path traversal. */
   private assertSafePath(path: string): void {
-    const normalized = path.replace(/\/+/g, '/').replace(/\/\.\.\//g, '/');
-    if (!normalized.startsWith(this.cacheDir)) {
+    const normalized = normalizePath(path);
+    const cacheRoot = normalizePath(this.cacheDir).replace(/\/$/, '');
+    if (normalized !== cacheRoot && !normalized.startsWith(`${cacheRoot}/`)) {
       throw new LocalLLMError(
         LocalLLMErrorCode.INVALID_PATH,
         `Path "${path}" is outside the cache directory "${this.cacheDir}"`,

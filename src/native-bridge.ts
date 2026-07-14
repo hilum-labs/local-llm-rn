@@ -1,6 +1,12 @@
 import NativeLocalLLM from './NativeLocalLLM';
 import { NativeEventEmitter, NativeModules } from 'react-native';
-import type { NativeAddon, NativeModel, NativeContext, NativeMtmdContext } from 'local-llm-js-core/native';
+import type {
+  NativeAddon,
+  NativeModel,
+  NativeContext,
+  NativeEmbeddingContext,
+  NativeMtmdContext,
+} from 'local-llm-js-core/native';
 import { getDeviceCapabilities } from './device';
 import { LocalLLMError, LocalLLMErrorCode } from './errors';
 
@@ -134,13 +140,20 @@ export function createReactNativeAddon(): NativeAddon {
 
     inferStream: (model, ctx, prompt, options, callback) => {
       const ctxId = unwrapId(ctx);
+      let settled = false;
       const sub = emitter.addListener('onToken', (event) => {
-        if (event.contextId !== ctxId) return;
-        if (event.error) { callback(new LocalLLMError(LocalLLMErrorCode.STREAM_FAILED, event.error), null); sub.remove(); return; }
-        if (event.done) { callback(null, null); sub.remove(); return; }
+        if (event.contextId !== ctxId || settled) return;
+        if (event.error) { settled = true; sub.remove(); callback(new LocalLLMError(LocalLLMErrorCode.STREAM_FAILED, event.error), null); return; }
+        if (event.done) { settled = true; sub.remove(); callback(null, null); return; }
         callback(null, event.token);
       });
-      NativeLocalLLM.startStream(unwrapId(model), ctxId, prompt, options ?? {});
+      try {
+        NativeLocalLLM.startStream(unwrapId(model), ctxId, prompt, options ?? {});
+      } catch (error) {
+        settled = true;
+        sub.remove();
+        callback(error instanceof Error ? error : new Error(String(error)), null);
+      }
     },
 
     createMtmdContext: (model, projectorPath, options) => {
@@ -160,15 +173,22 @@ export function createReactNativeAddon(): NativeAddon {
     inferStreamVision: (model, ctx, mtmdCtx, prompt, imageBuffers, options, callback) => {
       const ctxId = unwrapId(ctx);
       const base64s = imageBuffers.map((buf) => toBase64(buf));
+      let settled = false;
       const sub = emitter.addListener('onToken', (event) => {
-        if (event.contextId !== ctxId) return;
-        if (event.error) { callback(new LocalLLMError(LocalLLMErrorCode.VISION_FAILED, event.error), null); sub.remove(); return; }
-        if (event.done) { callback(null, null); sub.remove(); return; }
+        if (event.contextId !== ctxId || settled) return;
+        if (event.error) { settled = true; sub.remove(); callback(new LocalLLMError(LocalLLMErrorCode.VISION_FAILED, event.error), null); return; }
+        if (event.done) { settled = true; sub.remove(); callback(null, null); return; }
         callback(null, event.token);
       });
-      NativeLocalLLM.startStreamVision(
-        unwrapId(model), ctxId, unwrapId(mtmdCtx), prompt, base64s, options ?? {},
-      );
+      try {
+        NativeLocalLLM.startStreamVision(
+          unwrapId(model), ctxId, unwrapId(mtmdCtx), prompt, base64s, options ?? {},
+        );
+      } catch (error) {
+        settled = true;
+        sub.remove();
+        callback(error instanceof Error ? error : new Error(String(error)), null);
+      }
     },
 
     jsonSchemaToGrammar: (schemaJson) => NativeLocalLLM.jsonSchemaToGrammar(schemaJson),
@@ -176,8 +196,9 @@ export function createReactNativeAddon(): NativeAddon {
     getEmbeddingDimension: (model) => NativeLocalLLM.getEmbeddingDimension(unwrapId(model)),
     createEmbeddingContext: (model, options) => {
       const id = NativeLocalLLM.createEmbeddingContext(unwrapId(model), options ?? {});
-      return wrapId(id, 'NativeContext') as NativeContext;
+      return wrapId(id, 'NativeEmbeddingContext') as NativeEmbeddingContext;
     },
+    freeEmbeddingContext: (ctx) => NativeLocalLLM.freeEmbeddingContext(unwrapId(ctx)),
     embed: (ctx, model, tokens) => {
       const plain = tokens instanceof Int32Array ? Array.from(tokens) : tokens;
       return new Float32Array(NativeLocalLLM.embed(unwrapId(ctx), unwrapId(model), plain));
@@ -190,19 +211,34 @@ export function createReactNativeAddon(): NativeAddon {
 
     inferBatch: (model, ctx, prompts, options, callback) => {
       const ctxId = unwrapId(ctx);
-      let completedCount = 0;
+      const completedSequences = new Set<number>();
+      let settled = false;
       const sub = emitter.addListener('onBatchToken', (event) => {
-        if (event.contextId !== ctxId) return;
-        if (event.error) { callback(new LocalLLMError(LocalLLMErrorCode.INFERENCE_FAILED, event.error), null, event.seqIndex, null); return; }
+        if (event.contextId !== ctxId || settled) return;
+        if (event.error) {
+          settled = true;
+          sub.remove();
+          callback(new LocalLLMError(LocalLLMErrorCode.INFERENCE_FAILED, event.error), null, event.seqIndex, null);
+          return;
+        }
         if (event.done) {
+          completedSequences.add(event.seqIndex);
+          if (completedSequences.size >= prompts.length) {
+            settled = true;
+            sub.remove();
+          }
           callback(null, null, event.seqIndex, event.finishReason ?? null);
-          completedCount++;
-          if (completedCount >= prompts.length) sub.remove();
           return;
         }
         callback(null, event.token, event.seqIndex, null);
       });
-      NativeLocalLLM.startBatch(unwrapId(model), ctxId, prompts, options as any);
+      try {
+        NativeLocalLLM.startBatch(unwrapId(model), ctxId, prompts, options as any);
+      } catch (error) {
+        settled = true;
+        sub.remove();
+        callback(error instanceof Error ? error : new Error(String(error)), null, -1, null);
+      }
     },
 
     quantize: (inputPath, outputPath, options, callback) => {
@@ -210,7 +246,12 @@ export function createReactNativeAddon(): NativeAddon {
         sub.remove();
         callback(event.error ? new LocalLLMError(LocalLLMErrorCode.QUANTIZE_FAILED, event.error) : null);
       });
-      NativeLocalLLM.quantize(inputPath, outputPath, options);
+      try {
+        NativeLocalLLM.quantize(inputPath, outputPath, options);
+      } catch (error) {
+        sub.remove();
+        callback(error instanceof Error ? error : new Error(String(error)));
+      }
     },
 
     setLogCallback: (() => {

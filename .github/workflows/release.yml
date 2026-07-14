@@ -13,18 +13,25 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - name: Initialize engine submodule
         run: git submodule update --init --recursive
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - run: npm install
+      - name: Validate release
+        run: npm run verify:release -- "$GITHUB_REF_NAME" --check-registry
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Test package
+        run: pnpm audit --audit-level high && pnpm test && pnpm typecheck && pnpm run smoke:native-bridge && pnpm run verify:core-version
 
       - name: Pack engine source
         run: bash scripts/prepack.sh

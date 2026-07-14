@@ -57,6 +57,7 @@ export interface Spec extends TurboModule {
 
   getEmbeddingDimension(modelId: string): number;
   createEmbeddingContext(modelId: string, options: Object): string;
+  freeEmbeddingContext(contextId: string): void;
   embed(contextId: string, modelId: string, tokens: number[]): number[];
   embedBatch(contextId: string, modelId: string, tokenArrays: number[][]): number[][];
 

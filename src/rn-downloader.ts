@@ -33,11 +33,16 @@ export function createNativeDownloader(): DownloadAdapter {
           }),
         ];
 
-        if (resumableUrls.has(url)) {
-          resumableUrls.delete(url);
-          NativeLocalLLM.resumeDownload(url, destPath);
-        } else {
-          NativeLocalLLM.downloadModel(url, destPath);
+        try {
+          if (resumableUrls.has(url)) {
+            resumableUrls.delete(url);
+            NativeLocalLLM.resumeDownload(url, destPath);
+          } else {
+            NativeLocalLLM.downloadModel(url, destPath);
+          }
+        } catch (error) {
+          subs.forEach((s) => s.remove());
+          reject(error instanceof Error ? error : new Error(String(error)));
         }
       });
     },

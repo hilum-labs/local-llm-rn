@@ -1,11 +1,15 @@
+require "json"
+
+package = JSON.parse(File.read(File.join(__dir__, "package.json")))
+
 Pod::Spec.new do |s|
   s.name         = "local-llm-rn"
-  s.version      = "0.1.0"
+  s.version      = package["version"]
   s.summary      = "Local LLM inference for React Native"
   s.homepage     = "https://github.com/hilum-labs/local-llm-rn"
   s.license      = { :type => "MIT", :file => "LICENSE" }
   s.author       = "Hilum Labs"
-  s.source       = { :git => "https://github.com/hilum-labs/local-llm-rn.git", :tag => s.version.to_s }
+  s.source       = { :git => "https://github.com/hilum-labs/local-llm-rn.git", :tag => "v#{s.version}" }
   s.platforms    = { :ios => "16.0" }
 
   # Only the RN bridge (ios/) needs ARC; ggml Metal .m files use manual retain/release

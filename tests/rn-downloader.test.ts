@@ -147,4 +147,18 @@ describe('createNativeDownloader', () => {
     downloader.cancel(url);
     expect(nativeMock.cancelDownload).toHaveBeenCalledWith(url);
   });
+
+  it('rejects synchronous native failures without leaking event listeners', async () => {
+    const url = uniqueUrl();
+    nativeMock.downloadModel.mockImplementationOnce(() => {
+      throw new Error('Native downloader unavailable');
+    });
+    const { createNativeDownloader } = await import('../src/rn-downloader');
+    const downloader = createNativeDownloader();
+
+    await expect(downloader.download(url, '/dest/model.gguf')).rejects.toThrow(
+      'Native downloader unavailable',
+    );
+    expect(Object.values(eventHandlers).every((handlers) => handlers.length === 0)).toBe(true);
+  });
 });

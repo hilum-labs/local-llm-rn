@@ -21,12 +21,16 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
 
     /** Allowed root for file I/O — prevents reading/writing arbitrary paths. */
     private val allowedStorageRoot: String by lazy {
-        File(reactApplicationContext.filesDir, "local-llm").absolutePath
+        File(reactApplicationContext.filesDir, "local-llm").canonicalPath
     }
 
     private fun isPathAllowed(path: String): Boolean {
-        val resolved = File(path).canonicalPath
-        return resolved.startsWith(allowedStorageRoot)
+        return try {
+            val resolved = File(path).canonicalPath
+            resolved == allowedStorageRoot || resolved.startsWith(allowedStorageRoot + File.separator)
+        } catch (_: Exception) {
+            false
+        }
     }
 
     init {
@@ -50,13 +54,14 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
 
     @Suppress("unused")
     fun emitBatchToken(contextId: String, seqIndex: Int, token: String?,
-                       done: Boolean, finishReason: String?) {
+                       done: Boolean, finishReason: String?, error: String?) {
         val params = Arguments.createMap().apply {
             putString("contextId", contextId)
             putInt("seqIndex", seqIndex)
             putBoolean("done", done)
             if (token != null) putString("token", token)
             if (finishReason != null) putString("finishReason", finishReason)
+            if (error != null) putString("error", error)
         }
         sendEvent("onBatchToken", params)
     }
@@ -155,7 +160,9 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     override fun getModelSize(modelId: String): Double = nativeGetModelSize(modelId)
 
     @ReactMethod
-    override fun freeModel(modelId: String) { nativeFreeModel(modelId) }
+    override fun freeModel(modelId: String) {
+        executor.execute { nativeFreeModel(modelId) }
+    }
 
     // ── Context lifecycle ───────────────────────────────────────────────────
 
@@ -167,7 +174,9 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     override fun getContextSize(contextId: String): Double = nativeGetContextSize(contextId).toDouble()
 
     @ReactMethod
-    override fun freeContext(contextId: String) { nativeFreeContext(contextId) }
+    override fun freeContext(contextId: String) {
+        executor.execute { nativeFreeContext(contextId) }
+    }
 
     // ── Warmup ──────────────────────────────────────────────────────────────
 
@@ -298,7 +307,9 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     override fun supportVision(mtmdId: String): Boolean = nativeSupportVision(mtmdId)
 
     @ReactMethod
-    override fun freeMtmdContext(mtmdId: String) { nativeFreeMtmdContext(mtmdId) }
+    override fun freeMtmdContext(mtmdId: String) {
+        executor.execute { nativeFreeMtmdContext(mtmdId) }
+    }
 
     @ReactMethod
     override fun generateVision(modelId: String, contextId: String, mtmdId: String,
@@ -339,6 +350,11 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     @ReactMethod(isBlockingSynchronousMethod = true)
     override fun createEmbeddingContext(modelId: String, options: ReadableMap): String =
         nativeCreateEmbeddingContext(modelId, options.toHashMap())
+
+    @ReactMethod
+    override fun freeEmbeddingContext(contextId: String) {
+        executor.execute { nativeFreeEmbeddingContext(contextId) }
+    }
 
     @ReactMethod(isBlockingSynchronousMethod = true)
     override fun embed(contextId: String, modelId: String, tokens: ReadableArray): WritableArray {
@@ -402,6 +418,10 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     private val activeDownloads = java.util.concurrent.ConcurrentHashMap<String, Thread>()
 
     private fun executeDownload(url: String, destPath: String, resumeFrom: Long) {
+        if (!isPathAllowed(destPath)) {
+            emitDownloadError(url, "Destination is outside local-llm storage", false)
+            return
+        }
         val thread = Thread {
             try {
                 val destFile = File(destPath)
@@ -472,6 +492,10 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun resumeDownload(url: String, destPath: String) {
+        if (!isPathAllowed(destPath)) {
+            emitDownloadError(url, "Destination is outside local-llm storage", false)
+            return
+        }
         val destFile = File(destPath)
         val existingBytes = if (destFile.exists()) destFile.length() else 0L
         executeDownload(url, destPath, existingBytes)
@@ -512,10 +536,11 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod(isBlockingSynchronousMethod = true)
-    override fun fileExists(path: String): Boolean = File(path).exists()
+    override fun fileExists(path: String): Boolean = isPathAllowed(path) && File(path).exists()
 
     @ReactMethod(isBlockingSynchronousMethod = true)
-    override fun getFileSize(path: String): Double = File(path).length().toDouble()
+    override fun getFileSize(path: String): Double =
+        if (isPathAllowed(path)) File(path).length().toDouble() else 0.0
 
     @ReactMethod(isBlockingSynchronousMethod = true)
     override fun readTextFile(path: String): String? {
@@ -546,6 +571,10 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     override fun sha256File(path: String, promise: Promise) {
         executor.execute {
             try {
+                if (!isPathAllowed(path)) {
+                    promise.reject("E_INVALID_PATH", "Path is outside local-llm storage: $path")
+                    return@execute
+                }
                 val file = File(path)
                 if (!file.exists()) {
                     promise.reject("E_FILE_NOT_FOUND", "File not found: $path")
@@ -612,6 +641,7 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
     private external fun nativeGetEmbeddingDimension(modelId: String): Int
     private external fun nativeCreateEmbeddingContext(modelId: String,
                                                       options: HashMap<String, Any?>): String
+    private external fun nativeFreeEmbeddingContext(contextId: String)
     private external fun nativeEmbed(contextId: String, modelId: String,
                                       tokens: ArrayList<Int>): List<Any>
     private external fun nativeEmbedBatch(contextId: String, modelId: String,
@@ -623,5 +653,4 @@ class LocalLLMModule(reactContext: ReactApplicationContext) :
                                          options: HashMap<String, Any?>)
     private external fun nativeSetLogLevel(level: Int)
     private external fun nativeEnableLogEvents(enabled: Boolean)
-    private external fun nativeGetModelStoragePath(filesDir: String): String
 }

@@ -10,6 +10,7 @@
 #include <android/log.h>
 
 #include <string>
+#include <memory>
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
@@ -50,6 +51,12 @@ static std::unordered_map<std::string, hilum_model *> g_models;
 static std::unordered_map<std::string, hilum_context *> g_contexts;
 static std::unordered_map<std::string, hilum_mtmd *> g_mtmd_contexts;
 static std::unordered_map<std::string, hilum_emb_ctx *> g_emb_contexts;
+
+using ModelOwner = std::shared_ptr<hilum_model>;
+static std::unordered_map<std::string, ModelOwner> g_model_owners;
+static std::unordered_map<std::string, std::vector<ModelOwner>> g_context_model_owners;
+static std::unordered_map<std::string, ModelOwner> g_mtmd_model_owners;
+static std::unordered_map<std::string, ModelOwner> g_emb_model_owners;
 
 // ── Log state ────────────────────────────────────────────────────────────────
 
@@ -339,6 +346,7 @@ JNI_FN(nativeLoadModel)(JNIEnv *env, jobject thiz, jstring path, jobject options
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_models[modelId] = model;
+        g_model_owners[modelId] = ModelOwner(model, hilum_model_free);
     }
     LOGI("Model loaded: %s", modelId.c_str());
     return std_to_jstring(env, modelId);
@@ -356,11 +364,15 @@ JNI_FN(nativeGetModelSize)(JNIEnv *env, jobject thiz, jstring modelId) {
 JNIEXPORT void JNICALL
 JNI_FN(nativeFreeModel)(JNIEnv *env, jobject thiz, jstring modelId) {
     std::string id = jstring_to_std(env, modelId);
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_models.find(id);
-    if (it != g_models.end()) {
-        hilum_model_free(it->second);
-        g_models.erase(it);
+    ModelOwner owner;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_models.erase(id);
+        auto it = g_model_owners.find(id);
+        if (it != g_model_owners.end()) {
+            owner = std::move(it->second);
+            g_model_owners.erase(it);
+        }
     }
 }
 
@@ -373,6 +385,7 @@ JNI_FN(nativeCreateContext)(JNIEnv *env, jobject thiz, jstring modelId, jobject 
     auto it = g_models.find(mid);
     if (it == g_models.end()) return std_to_jstring(env, "");
 
+    std::vector<ModelOwner> owners{g_model_owners[mid]};
     hilum_context_params params = hilum_context_default_params();
     if (options) {
         params.n_ctx        = (uint32_t)get_int_from_map(env, options, "n_ctx", params.n_ctx);
@@ -386,7 +399,10 @@ JNI_FN(nativeCreateContext)(JNIEnv *env, jobject thiz, jstring modelId, jobject 
         std::string draftId = get_string_from_map(env, options, "draft_model_id");
         if (!draftId.empty()) {
             auto dit = g_models.find(draftId);
-            if (dit != g_models.end()) params.draft_model = dit->second;
+            if (dit != g_models.end()) {
+                params.draft_model = dit->second;
+                owners.push_back(g_model_owners[draftId]);
+            }
         }
     }
 
@@ -396,6 +412,7 @@ JNI_FN(nativeCreateContext)(JNIEnv *env, jobject thiz, jstring modelId, jobject 
 
     std::string ctxId = generate_uuid();
     g_contexts[ctxId] = ctx;
+    g_context_model_owners[ctxId] = std::move(owners);
     return std_to_jstring(env, ctxId);
 }
 
@@ -411,12 +428,22 @@ JNI_FN(nativeGetContextSize)(JNIEnv *env, jobject thiz, jstring contextId) {
 JNIEXPORT void JNICALL
 JNI_FN(nativeFreeContext)(JNIEnv *env, jobject thiz, jstring contextId) {
     std::string id = jstring_to_std(env, contextId);
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_contexts.find(id);
-    if (it != g_contexts.end()) {
-        hilum_context_free(it->second);
-        g_contexts.erase(it);
+    hilum_context *context = nullptr;
+    std::vector<ModelOwner> owners;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_contexts.find(id);
+        if (it != g_contexts.end()) {
+            context = it->second;
+            g_contexts.erase(it);
+        }
+        auto owner = g_context_model_owners.find(id);
+        if (owner != g_context_model_owners.end()) {
+            owners = std::move(owner->second);
+            g_context_model_owners.erase(owner);
+        }
     }
+    if (context) hilum_context_free(context);
 }
 
 // ── Warmup ───────────────────────────────────────────────────────────────────
@@ -641,7 +668,7 @@ JNI_FN(nativeStartStream)(JNIEnv *env, jobject thiz, jstring modelId, jstring co
             JNIEnv *env;
             bool detach = false;
             if (s->jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                s->jvm->AttachCurrentThread(&env, nullptr);
+                s->jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
                 detach = true;
             }
 
@@ -823,6 +850,7 @@ JNI_FN(nativeLoadProjector)(JNIEnv *env, jobject thiz, jstring modelId,
 
     std::string mtmdId = generate_uuid();
     g_mtmd_contexts[mtmdId] = mtmd;
+    g_mtmd_model_owners[mtmdId] = g_model_owners[mid];
     return std_to_jstring(env, mtmdId);
 }
 
@@ -838,12 +866,22 @@ JNI_FN(nativeSupportVision)(JNIEnv *env, jobject thiz, jstring mtmdId) {
 JNIEXPORT void JNICALL
 JNI_FN(nativeFreeMtmdContext)(JNIEnv *env, jobject thiz, jstring mtmdId) {
     std::string id = jstring_to_std(env, mtmdId);
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_mtmd_contexts.find(id);
-    if (it != g_mtmd_contexts.end()) {
-        hilum_mtmd_free(it->second);
-        g_mtmd_contexts.erase(it);
+    hilum_mtmd *mtmd = nullptr;
+    ModelOwner owner;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_mtmd_contexts.find(id);
+        if (it != g_mtmd_contexts.end()) {
+            mtmd = it->second;
+            g_mtmd_contexts.erase(it);
+        }
+        auto modelOwner = g_mtmd_model_owners.find(id);
+        if (modelOwner != g_mtmd_model_owners.end()) {
+            owner = std::move(modelOwner->second);
+            g_mtmd_model_owners.erase(modelOwner);
+        }
     }
+    if (mtmd) hilum_mtmd_free(mtmd);
 }
 
 JNIEXPORT jstring JNICALL
@@ -963,7 +1001,7 @@ JNI_FN(nativeStartStreamVision)(JNIEnv *env, jobject thiz, jstring modelId,
             JNIEnv *env;
             bool detach = false;
             if (s->jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                s->jvm->AttachCurrentThread(&env, nullptr);
+                s->jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
                 detach = true;
             }
 
@@ -1043,7 +1081,29 @@ JNI_FN(nativeCreateEmbeddingContext)(JNIEnv *env, jobject thiz, jstring modelId,
 
     std::string ctxId = generate_uuid();
     g_emb_contexts[ctxId] = ectx;
+    g_emb_model_owners[ctxId] = g_model_owners[mid];
     return std_to_jstring(env, ctxId);
+}
+
+JNIEXPORT void JNICALL
+JNI_FN(nativeFreeEmbeddingContext)(JNIEnv *env, jobject thiz, jstring contextId) {
+    std::string id = jstring_to_std(env, contextId);
+    hilum_emb_ctx *context = nullptr;
+    ModelOwner owner;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_emb_contexts.find(id);
+        if (it != g_emb_contexts.end()) {
+            context = it->second;
+            g_emb_contexts.erase(it);
+        }
+        auto modelOwner = g_emb_model_owners.find(id);
+        if (modelOwner != g_emb_model_owners.end()) {
+            owner = std::move(modelOwner->second);
+            g_emb_model_owners.erase(modelOwner);
+        }
+    }
+    if (context) hilum_emb_context_free(context);
 }
 
 JNIEXPORT jobject JNICALL
@@ -1174,10 +1234,10 @@ JNI_FN(nativeStartBatch)(JNIEnv *env, jobject thiz, jstring modelId, jstring con
         if (mi == g_models.end() || ci == g_contexts.end()) {
             jclass cls = env->GetObjectClass(thiz);
             jmethodID emitMethod = env->GetMethodID(cls, "emitBatchToken",
-                "(Ljava/lang/String;ILjava/lang/String;ZLjava/lang/String;)V");
+                "(Ljava/lang/String;ILjava/lang/String;ZLjava/lang/String;Ljava/lang/String;)V");
             jstring jcid = std_to_jstring(env, cid);
             jstring jerr = env->NewStringUTF("Not found");
-            env->CallVoidMethod(thiz, emitMethod, jcid, -1, nullptr, JNI_TRUE, jerr);
+            env->CallVoidMethod(thiz, emitMethod, jcid, -1, nullptr, JNI_TRUE, nullptr, jerr);
             env->DeleteLocalRef(jcid);
             env->DeleteLocalRef(jerr);
             env->DeleteLocalRef(cls);
@@ -1208,32 +1268,32 @@ JNI_FN(nativeStartBatch)(JNIEnv *env, jobject thiz, jstring modelId, jstring con
     };
     BatchState *state = new BatchState{moduleRef, cid, g_jvm};
 
-    hilum_generate_batch(model, ctx, prompt_ptrs.data(), n_seqs, gc.params,
+    hilum_error batchErr = hilum_generate_batch(model, ctx, prompt_ptrs.data(), n_seqs, gc.params,
         [](hilum_batch_event event, void *ud) -> bool {
             auto *s = static_cast<BatchState *>(ud);
 
             JNIEnv *env;
             bool detach = false;
             if (s->jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                s->jvm->AttachCurrentThread(&env, nullptr);
+                s->jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
                 detach = true;
             }
 
             jclass cls = env->GetObjectClass(s->moduleRef);
             jmethodID emitMethod = env->GetMethodID(cls, "emitBatchToken",
-                "(Ljava/lang/String;ILjava/lang/String;ZLjava/lang/String;)V");
+                "(Ljava/lang/String;ILjava/lang/String;ZLjava/lang/String;Ljava/lang/String;)V");
             jstring jcid = env->NewStringUTF(s->ctxId.c_str());
 
             if (event.done) {
                 jstring reason = event.finish_reason
                     ? env->NewStringUTF(event.finish_reason) : env->NewStringUTF("stop");
                 env->CallVoidMethod(s->moduleRef, emitMethod, jcid, event.seq_index,
-                    nullptr, JNI_TRUE, reason);
+                    nullptr, JNI_TRUE, reason, nullptr);
                 env->DeleteLocalRef(reason);
             } else {
                 jstring jtok = env->NewStringUTF(std::string(event.token, event.token_len).c_str());
                 env->CallVoidMethod(s->moduleRef, emitMethod, jcid, event.seq_index,
-                    jtok, JNI_FALSE, nullptr);
+                    jtok, JNI_FALSE, nullptr, nullptr);
                 env->DeleteLocalRef(jtok);
             }
             env->DeleteLocalRef(jcid);
@@ -1242,6 +1302,17 @@ JNI_FN(nativeStartBatch)(JNIEnv *env, jobject thiz, jstring modelId, jstring con
             if (detach) s->jvm->DetachCurrentThread();
             return true;
         }, state);
+    if (batchErr != HILUM_OK) {
+        jclass cls = env->GetObjectClass(thiz);
+        jmethodID emitMethod = env->GetMethodID(cls, "emitBatchToken",
+            "(Ljava/lang/String;ILjava/lang/String;ZLjava/lang/String;Ljava/lang/String;)V");
+        jstring jcid = std_to_jstring(env, cid);
+        jstring jerr = env->NewStringUTF(hilum_error_str(batchErr));
+        env->CallVoidMethod(thiz, emitMethod, jcid, -1, nullptr, JNI_TRUE, nullptr, jerr);
+        env->DeleteLocalRef(jcid);
+        env->DeleteLocalRef(jerr);
+        env->DeleteLocalRef(cls);
+    }
     env->DeleteGlobalRef(moduleRef);
     delete state;
 }
@@ -1300,7 +1371,7 @@ JNI_FN(nativeEnableLogEvents)(JNIEnv *env, jobject thiz, jboolean enabled) {
             JNIEnv *env;
             bool detach = false;
             if (g_jvm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                g_jvm->AttachCurrentThread(&env, nullptr);
+                g_jvm->AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr);
                 detach = true;
             }
 
@@ -1325,18 +1396,6 @@ JNI_FN(nativeEnableLogEvents)(JNIEnv *env, jobject thiz, jboolean enabled) {
             g_module_ref = nullptr;
         }
     }
-}
-
-// ── Downloads (handled in Kotlin, JNI just provides storage path) ────────────
-
-JNIEXPORT jstring JNICALL
-JNI_FN(nativeGetModelStoragePath)(JNIEnv *env, jobject thiz, jstring filesDir) {
-    std::string dir = jstring_to_std(env, filesDir);
-    std::string path = dir + "/local-llm/models";
-    // Create directory if needed
-    std::string cmd = "mkdir -p " + path;
-    system(cmd.c_str());
-    return std_to_jstring(env, path);
 }
 
 } // extern "C"

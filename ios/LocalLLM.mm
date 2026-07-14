@@ -16,6 +16,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <memory>
 #include <mutex>
 #include <atomic>
 
@@ -24,10 +25,6 @@
 #import <Metal/Metal.h>
 #import <os/proc.h>
 #import <CommonCrypto/CommonDigest.h>
-
-#ifdef RCT_NEW_ARCH_ENABLED
-#import <memory>
-#endif
 
 // ── UUID generation ──────────────────────────────────────────────────────────
 
@@ -50,9 +47,11 @@ static NSString *allowedStorageRoot() {
 /// Returns YES if the path is under the allowed storage root (Application Support/local-llm/).
 /// This prevents callers from reading/writing arbitrary filesystem locations.
 static BOOL isPathAllowed(NSString *path) {
-  NSString *resolved = [path stringByStandardizingPath];
-  NSString *root = [allowedStorageRoot() stringByStandardizingPath];
-  return [resolved hasPrefix:root];
+  NSString *resolved = [[path stringByStandardizingPath] stringByResolvingSymlinksInPath];
+  NSString *root = [[allowedStorageRoot() stringByStandardizingPath]
+      stringByResolvingSymlinksInPath];
+  NSString *rootPrefix = [root stringByAppendingString:@"/"];
+  return [resolved isEqualToString:root] || [resolved hasPrefix:rootPrefix];
 }
 
 // ── Handle maps ──────────────────────────────────────────────────────────────
@@ -63,6 +62,12 @@ static std::unordered_map<std::string, hilum_model *> g_models;
 static std::unordered_map<std::string, hilum_context *> g_contexts;
 static std::unordered_map<std::string, hilum_mtmd *> g_mtmd_contexts;
 static std::unordered_map<std::string, hilum_emb_ctx *> g_emb_contexts;
+
+using ModelOwner = std::shared_ptr<hilum_model>;
+static std::unordered_map<std::string, ModelOwner> g_model_owners;
+static std::unordered_map<std::string, std::vector<ModelOwner>> g_context_model_owners;
+static std::unordered_map<std::string, ModelOwner> g_mtmd_model_owners;
+static std::unordered_map<std::string, ModelOwner> g_emb_model_owners;
 
 // ── Log state ────────────────────────────────────────────────────────────────
 
@@ -303,7 +308,9 @@ RCT_EXPORT_METHOD(loadModel:(NSString *)path
     NSString *modelId = generateUUID();
     {
       std::lock_guard<std::mutex> lock(g_mutex);
-      g_models[[modelId UTF8String]] = model;
+      const std::string id = [modelId UTF8String];
+      g_models[id] = model;
+      g_model_owners[id] = ModelOwner(model, hilum_model_free);
     }
     resolve(modelId);
   });
@@ -317,12 +324,19 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(getModelSize:(NSString *)modelId) {
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(freeModel:(NSString *)modelId) {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  auto it = g_models.find([modelId UTF8String]);
-  if (it != g_models.end()) {
-    hilum_model_free(it->second);
-    g_models.erase(it);
-  }
+  dispatch_async(inference_queue(), ^{
+    ModelOwner owner;
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      const std::string id = [modelId UTF8String];
+      g_models.erase(id);
+      auto it = g_model_owners.find(id);
+      if (it != g_model_owners.end()) {
+        owner = std::move(it->second);
+        g_model_owners.erase(it);
+      }
+    }
+  });
   return nil;
 }
 
@@ -354,7 +368,15 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(createContext:(NSString *)modelId
   if (err != HILUM_OK) return @"";
 
   NSString *ctxId = generateUUID();
-  g_contexts[[ctxId UTF8String]] = ctx;
+  const std::string contextKey = [ctxId UTF8String];
+  g_contexts[contextKey] = ctx;
+  auto & owners = g_context_model_owners[contextKey];
+  owners.push_back(g_model_owners[[modelId UTF8String]]);
+  if (options[@"draft_model_id"]) {
+    const std::string draftKey = [options[@"draft_model_id"] UTF8String];
+    auto owner = g_model_owners.find(draftKey);
+    if (owner != g_model_owners.end()) owners.push_back(owner->second);
+  }
   return ctxId;
 }
 
@@ -366,12 +388,27 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(getContextSize:(NSString *)contextId) {
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(freeContext:(NSString *)contextId) {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  auto it = g_contexts.find([contextId UTF8String]);
-  if (it != g_contexts.end()) {
-    hilum_context_free(it->second);
-    g_contexts.erase(it);
-  }
+  dispatch_async(inference_queue(), ^{
+    hilum_context *context = nullptr;
+    std::vector<ModelOwner> owners;
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      const std::string id = [contextId UTF8String];
+      auto it = g_contexts.find(id);
+      if (it != g_contexts.end()) {
+        context = it->second;
+        g_contexts.erase(it);
+      }
+      auto owner = g_context_model_owners.find(id);
+      if (owner != g_context_model_owners.end()) {
+        owners = std::move(owner->second);
+        g_context_model_owners.erase(owner);
+      }
+    }
+    if (context) {
+      hilum_context_free(context);
+    }
+  });
   return nil;
 }
 
@@ -663,7 +700,9 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(loadProjector:(NSString *)modelId
   if (err != HILUM_OK) return @"";
 
   NSString *mtmdId = generateUUID();
-  g_mtmd_contexts[[mtmdId UTF8String]] = mtmd;
+  const std::string mtmdKey = [mtmdId UTF8String];
+  g_mtmd_contexts[mtmdKey] = mtmd;
+  g_mtmd_model_owners[mtmdKey] = g_model_owners[[modelId UTF8String]];
   return mtmdId;
 }
 
@@ -675,12 +714,27 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(supportVision:(NSString *)mtmdId) {
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(freeMtmdContext:(NSString *)mtmdId) {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  auto it = g_mtmd_contexts.find([mtmdId UTF8String]);
-  if (it != g_mtmd_contexts.end()) {
-    hilum_mtmd_free(it->second);
-    g_mtmd_contexts.erase(it);
-  }
+  dispatch_async(inference_queue(), ^{
+    hilum_mtmd *mtmd = nullptr;
+    ModelOwner owner;
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      const std::string id = [mtmdId UTF8String];
+      auto it = g_mtmd_contexts.find(id);
+      if (it != g_mtmd_contexts.end()) {
+        mtmd = it->second;
+        g_mtmd_contexts.erase(it);
+      }
+      auto modelOwner = g_mtmd_model_owners.find(id);
+      if (modelOwner != g_mtmd_model_owners.end()) {
+        owner = std::move(modelOwner->second);
+        g_mtmd_model_owners.erase(modelOwner);
+      }
+    }
+    if (mtmd) {
+      hilum_mtmd_free(mtmd);
+    }
+  });
   return nil;
 }
 
@@ -848,8 +902,35 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(createEmbeddingContext:(NSString *)modelI
   if (err != HILUM_OK) return @"";
 
   NSString *ctxId = generateUUID();
-  g_emb_contexts[[ctxId UTF8String]] = ectx;
+  const std::string contextKey = [ctxId UTF8String];
+  g_emb_contexts[contextKey] = ectx;
+  g_emb_model_owners[contextKey] = g_model_owners[[modelId UTF8String]];
   return ctxId;
+}
+
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(freeEmbeddingContext:(NSString *)contextId) {
+  dispatch_async(inference_queue(), ^{
+    hilum_emb_ctx *context = nullptr;
+    ModelOwner owner;
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      const std::string id = [contextId UTF8String];
+      auto it = g_emb_contexts.find(id);
+      if (it != g_emb_contexts.end()) {
+        context = it->second;
+        g_emb_contexts.erase(it);
+      }
+      auto modelOwner = g_emb_model_owners.find(id);
+      if (modelOwner != g_emb_model_owners.end()) {
+        owner = std::move(modelOwner->second);
+        g_emb_model_owners.erase(modelOwner);
+      }
+    }
+    if (context) {
+      hilum_emb_context_free(context);
+    }
+  });
+  return nil;
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(embed:(NSString *)contextId
@@ -957,7 +1038,7 @@ RCT_EXPORT_METHOD(startBatch:(NSString *)modelId
     };
     BatchState state = { self, contextId };
 
-    hilum_generate_batch(model, ctx, prompt_ptrs.data(), n_seqs, gc.params,
+    hilum_error batchError = hilum_generate_batch(model, ctx, prompt_ptrs.data(), n_seqs, gc.params,
       [](hilum_batch_event event, void *ud) -> bool {
         auto *s = static_cast<BatchState *>(ud);
         if (event.done) {
@@ -977,6 +1058,12 @@ RCT_EXPORT_METHOD(startBatch:(NSString *)modelId
         }
         return true;
       }, &state);
+    if (batchError != HILUM_OK) {
+      [self sendEventWithName:@"onBatchToken" body:@{
+        @"contextId": contextId, @"done": @YES, @"error": @(hilum_error_str(batchError)),
+        @"seqIndex": @(-1)
+      }];
+    }
   });
 }
 
@@ -1033,6 +1120,12 @@ RCT_EXPORT_METHOD(enableLogEvents:(BOOL)enabled) {
 // ── Downloads ────────────────────────────────────────────────────────────────
 
 RCT_EXPORT_METHOD(downloadModel:(NSString *)url destPath:(NSString *)destPath) {
+  if (!isPathAllowed(destPath)) {
+    [self sendEventWithName:@"onDownloadError" body:@{
+      @"url": url ?: @"", @"error": @"Destination is outside local-llm storage", @"resumable": @NO
+    }];
+    return;
+  }
   NSURL *nsUrl = [NSURL URLWithString:url];
   if (!nsUrl) return;
   _downloadDelegate.destPaths[url] = destPath;
@@ -1041,6 +1134,12 @@ RCT_EXPORT_METHOD(downloadModel:(NSString *)url destPath:(NSString *)destPath) {
 }
 
 RCT_EXPORT_METHOD(resumeDownload:(NSString *)url destPath:(NSString *)destPath) {
+  if (!isPathAllowed(destPath)) {
+    [self sendEventWithName:@"onDownloadError" body:@{
+      @"url": url ?: @"", @"error": @"Destination is outside local-llm storage", @"resumable": @NO
+    }];
+    return;
+  }
   NSData *data = _downloadDelegate.resumeData[url];
   _downloadDelegate.destPaths[url] = destPath;
   if (data) {
@@ -1118,10 +1217,12 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(getModelStoragePath) {
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(fileExists:(NSString *)path) {
+  if (!isPathAllowed(path)) return @(NO);
   return @([[NSFileManager defaultManager] fileExistsAtPath:path]);
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(getFileSize:(NSString *)path) {
+  if (!isPathAllowed(path)) return @0;
   NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
   NSNumber *size = attrs[NSFileSize];
   return size ?: @0;
@@ -1159,6 +1260,10 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(removePath:(NSString *)path) {
 RCT_EXPORT_METHOD(sha256File:(NSString *)path
                       resolve:(RCTPromiseResolveBlock)resolve
                        reject:(RCTPromiseRejectBlock)reject) {
+  if (!isPathAllowed(path)) {
+    reject(@"E_INVALID_PATH", @"Path is outside local-llm storage", nil);
+    return;
+  }
   dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
     NSInputStream *stream = [NSInputStream inputStreamWithFileAtPath:path];
     if (!stream) {

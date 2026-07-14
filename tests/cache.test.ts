@@ -109,4 +109,16 @@ describe('ModelCache', () => {
       expect(e.message).toContain('outside the cache directory');
     }
   });
+
+  it('rejects sibling-prefix and traversal paths', async () => {
+    const { ModelCache } = await import('../src/cache');
+    const cache = new ModelCache('/models');
+
+    await expect(
+      cache.cacheModel('https://example.com/model.gguf', '/models-evil/model.gguf', 100),
+    ).rejects.toMatchObject({ code: LocalLLMErrorCode.INVALID_PATH });
+    await expect(
+      cache.cacheModel('https://example.com/model.gguf', '/models/safe/../../etc/passwd', 100),
+    ).rejects.toMatchObject({ code: LocalLLMErrorCode.INVALID_PATH });
+  });
 });

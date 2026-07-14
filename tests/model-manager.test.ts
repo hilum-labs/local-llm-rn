@@ -39,7 +39,7 @@ describe('ModelManager', () => {
   });
 
   it('returns cached model paths without downloading again', async () => {
-    getCachedModel.mockResolvedValueOnce({ path: '/cache/model.gguf' });
+    getCachedModel.mockResolvedValueOnce({ path: '/cache/model.gguf', size: 1234 });
 
     const { ModelManager } = await import('../src/model-manager');
     const manager = new ModelManager('/cache');
@@ -47,6 +47,33 @@ describe('ModelManager', () => {
     await expect(manager.downloadModel('user/repo/model.gguf')).resolves.toBe('/cache/model.gguf');
     expect(download).not.toHaveBeenCalled();
     expect(cacheModel).not.toHaveBeenCalled();
+  });
+
+  it('discards and redownloads a cached model whose size changed', async () => {
+    getCachedModel.mockResolvedValueOnce({ path: '/cache/model.gguf', size: 999 });
+    download.mockResolvedValueOnce(undefined);
+    cacheModel.mockResolvedValueOnce(undefined);
+
+    const { ModelManager } = await import('../src/model-manager');
+    const manager = new ModelManager('/cache');
+
+    await manager.downloadModel('user/repo/model.gguf');
+    expect(removeModel).toHaveBeenCalledOnce();
+    expect(download).toHaveBeenCalledOnce();
+    expect(cacheModel).toHaveBeenCalledOnce();
+  });
+
+  it('verifies cached SHA256 metadata before returning the file', async () => {
+    getCachedModel.mockResolvedValueOnce({ path: '/cache/model.gguf', size: 1234 });
+    nativeMock.sha256File.mockResolvedValueOnce('abc123');
+
+    const { ModelManager } = await import('../src/model-manager');
+    const manager = new ModelManager('/cache');
+
+    await expect(
+      manager.downloadModel('user/repo/model.gguf', { expectedSha256: 'ABC123' }),
+    ).resolves.toBe('/cache/model.gguf');
+    expect(download).not.toHaveBeenCalled();
   });
 
   it('downloads and caches a model on cache miss', async () => {

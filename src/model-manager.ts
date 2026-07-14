@@ -35,7 +35,19 @@ export class ModelManager {
   async downloadModel(url: string, options?: DownloadOptions): Promise<string> {
     const resolvedUrl = resolveModelUrl(url);
     const cached = await this.cache.getCachedModel(resolvedUrl);
-    if (cached) return cached.path;
+    if (cached) {
+      const actualSize = NativeLocalLLM.getFileSize(cached.path);
+      const expectedSize = options?.expectedSize ?? cached.size;
+      const sizeMatches = actualSize > 0 && actualSize === expectedSize;
+      const hashMatches = !options?.expectedSha256
+        || await NativeLocalLLM.sha256File(cached.path) === options.expectedSha256.toLowerCase();
+
+      if (sizeMatches && hashMatches) return cached.path;
+
+      // Never return a cache entry whose bytes no longer match its recorded or
+      // caller-provided integrity metadata. Remove it and perform a clean download.
+      await this.cache.removeModel(resolvedUrl);
+    }
 
     const targetPath = this.cache.targetPath(resolvedUrl);
     await this.downloader.download(resolvedUrl, targetPath, options?.onProgress);
@@ -48,7 +60,7 @@ export class ModelManager {
         `Downloaded file is empty: ${resolvedUrl}`,
       );
     }
-    if (options?.expectedSize && size !== options.expectedSize) {
+    if (options?.expectedSize !== undefined && size !== options.expectedSize) {
       NativeLocalLLM.removePath(targetPath);
       throw new LocalLLMError(
         LocalLLMErrorCode.DOWNLOAD_INTEGRITY_MISMATCH,

@@ -29,6 +29,21 @@ function run(cmd, args, opts = {}) {
   return (res.stdout || "").trim();
 }
 
+function ensureVersionAvailableOnNpm(pkgName, version) {
+  const result = spawnSync("npm", ["view", `${pkgName}@${version}`, "version"], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+  });
+  if (result.status === 0) throw new Error(`${pkgName}@${version} is already published on npm.`);
+
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+  if (!/E404|404 Not Found/i.test(output)) {
+    if (output.trim()) console.error(output.trim());
+    throw new Error(`Could not verify npm availability for ${pkgName}@${version}.`);
+  }
+}
+
 function readJson(relPath) {
   return JSON.parse(readFileSync(path.join(repoRoot, relPath), "utf8"));
 }
@@ -69,6 +84,7 @@ async function main() {
     const current = pkg.version;
     console.log(`Current version: ${current}`);
     console.log("Select release type:");
+    console.log("0) release current prepared version");
     console.log("1) patch");
     console.log("2) minor");
     console.log("3) major");
@@ -76,7 +92,8 @@ async function main() {
 
     const choice = (await rl.question("Choice [1]: ")).trim() || "1";
     let nextVersion;
-    if (choice === "1") nextVersion = bump(current, "patch");
+    if (choice === "0") nextVersion = current;
+    else if (choice === "1") nextVersion = bump(current, "patch");
     else if (choice === "2") nextVersion = bump(current, "minor");
     else if (choice === "3") nextVersion = bump(current, "major");
     else if (choice === "4") {
@@ -99,12 +116,25 @@ async function main() {
     ensureCleanGit();
     ensureMainBranch();
     run("git", ["pull", "--rebase"]);
+    ensureVersionAvailableOnNpm(pkg.name, nextVersion);
 
-    pkg.version = nextVersion;
-    writeJson(pkgPath, pkg);
+    if (nextVersion !== current) {
+      pkg.version = nextVersion;
+      writeJson(pkgPath, pkg);
+    }
 
-    run("git", ["add", pkgPath]);
-    run("git", ["commit", "-m", `chore(release): v${nextVersion}`]);
+    run("pnpm", ["install", "--frozen-lockfile"]);
+    run("pnpm", ["audit", "--audit-level", "high"]);
+    run("pnpm", ["test"]);
+    run("pnpm", ["typecheck"]);
+    run("pnpm", ["run", "smoke:native-bridge"]);
+    run("pnpm", ["run", "verify:core-version"]);
+    run("pnpm", ["run", "verify:release", "--", tag]);
+
+    if (nextVersion !== current) {
+      run("git", ["add", pkgPath]);
+      run("git", ["commit", "-m", `chore(release): v${nextVersion}`]);
+    }
     run("git", ["tag", "-a", tag, "-m", tag]);
     run("git", ["push", "origin", "HEAD"]);
     run("git", ["push", "origin", tag]);
