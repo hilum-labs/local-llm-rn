@@ -29,6 +29,10 @@ function run(cmd, args, opts = {}) {
   return (res.stdout || "").trim();
 }
 
+function runPnpm(args) {
+  return run("corepack", ["pnpm", ...args]);
+}
+
 function ensureVersionAvailableOnNpm(pkgName, version) {
   const result = spawnSync("npm", ["view", `${pkgName}@${version}`, "version"], {
     cwd: repoRoot,
@@ -123,13 +127,13 @@ async function main() {
       writeJson(pkgPath, pkg);
     }
 
-    run("pnpm", ["install", "--frozen-lockfile"]);
-    run("pnpm", ["audit", "--audit-level", "high"]);
-    run("pnpm", ["test"]);
-    run("pnpm", ["typecheck"]);
-    run("pnpm", ["run", "smoke:native-bridge"]);
-    run("pnpm", ["run", "verify:core-version"]);
-    run("pnpm", ["run", "verify:release", "--", tag]);
+    runPnpm(["install", "--frozen-lockfile"]);
+    runPnpm(["audit", "--audit-level", "high"]);
+    runPnpm(["test"]);
+    runPnpm(["typecheck"]);
+    runPnpm(["run", "smoke:native-bridge"]);
+    runPnpm(["run", "verify:core-version"]);
+    runPnpm(["run", "verify:release", "--", tag]);
 
     if (nextVersion !== current) {
       run("git", ["add", pkgPath]);
